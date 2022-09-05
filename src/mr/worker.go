@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"strconv"
+	"time"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +30,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -34,8 +39,76 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	//CallExample()
+	for true {
+		task := GetTask()
+		//fmt.Println(task.TaskState)
+		if task.TaskState == Begin {
+			task.TaskState = Working
+			DoMap(mapf, task)
+			mapDone(task)
+		} else if task.TaskState == Waiting { //如果是map的waiting，但是map已经结束，先传waiting过来，但是master已经进入reduce
+			fmt.Println("All tasks have been done, waiting...")
+			time.Sleep(time.Second)
+		} else if task.TaskState == Exit {
+			//fmt.Println("Task ", task.TaskID, " has been done.")
+			break
+		}
+	}
+}
 
+func DoMap(mapf func(string, string) []KeyValue, task Task) {
+	intermediate := []KeyValue{}
+	fileName, reduceNum := task.FileName, task.ReduceNum
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot open %v", fileName)
+	}
+	file.Close()
+	intermediate = mapf(fileName, string(content))
+	kvs := make([][]KeyValue, reduceNum)
+	for _, kv := range intermediate {
+		kvs[ihash(kv.Key)%reduceNum] = append(kvs[ihash(kv.Key)%reduceNum], kv)
+	}
+	for i := 0; i < reduceNum; i++ {
+		path := "mr-" + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
+		outputFile, _ := os.Create(path)
+		enc := json.NewEncoder(outputFile)
+		for _, kv := range kvs[i] {
+			err := enc.Encode(&kv)
+			if err != nil {
+				log.Fatalf("Save intermediate file %s failure.\n", path)
+			}
+		}
+		outputFile.Close()
+	}
+}
+
+func mapDone(task Task) {
+	reply := struct{}{}
+	ok := call("Coordinator.MarkMapDone", &task, &reply)
+	if ok {
+		fmt.Printf("Task %d Done\n", task.TaskID)
+	} else {
+		fmt.Printf("Task %d call markMapDone failed\n", task.TaskID)
+	}
+}
+
+func GetTask() Task {
+	args := struct{}{}
+	reply := Task{}
+	ok := call("Coordinator.GiveTask", &args, &reply)
+	if ok {
+		fmt.Printf("Get task %d success\n", reply.TaskID)
+	} else {
+		reply.TaskState = Exit
+		fmt.Println("Get task Failed.")
+	}
+	return reply
 }
 
 //
