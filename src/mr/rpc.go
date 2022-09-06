@@ -6,7 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+	"time"
+)
 import "strconv"
 
 //
@@ -24,11 +27,12 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type Task struct {
-	TaskType  TaskType
-	TaskState TaskState
-	TaskID    int
-	FileName  string
-	ReduceNum int
+	TaskType     TaskType
+	TaskState    TaskState
+	TaskID       int
+	FileNameList []string
+	ReduceNum    int
+	AssignTime   time.Time
 }
 
 type TaskType int

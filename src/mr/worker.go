@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -41,14 +50,19 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
 	for true {
+		fmt.Println("request task")
 		task := GetTask()
 		//fmt.Println(task.TaskState)
-		if task.TaskState == Begin {
-			task.TaskState = Working
-			DoMap(mapf, task)
-			mapDone(task)
+		if task.TaskState == Working {
+			if task.TaskType == MapTask {
+				DoMap(mapf, task)
+				mapDone(task)
+			} else {
+				DoReduce(reducef, task)
+				reduceDone(task)
+			}
 		} else if task.TaskState == Waiting { //如果是map的waiting，但是map已经结束，先传waiting过来，但是master已经进入reduce
-			fmt.Println("All tasks have been done, waiting...")
+			fmt.Println("All tasks have been assigned, waiting...")
 			time.Sleep(time.Second)
 		} else if task.TaskState == Exit {
 			//fmt.Println("Task ", task.TaskID, " has been done.")
@@ -59,7 +73,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func DoMap(mapf func(string, string) []KeyValue, task Task) {
 	intermediate := []KeyValue{}
-	fileName, reduceNum := task.FileName, task.ReduceNum
+	fileName, reduceNum := task.FileNameList[0], task.ReduceNum
 	file, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot open %v", fileName)
@@ -75,7 +89,7 @@ func DoMap(mapf func(string, string) []KeyValue, task Task) {
 		kvs[ihash(kv.Key)%reduceNum] = append(kvs[ihash(kv.Key)%reduceNum], kv)
 	}
 	for i := 0; i < reduceNum; i++ {
-		path := "mr-" + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
+		path := "mr-tmp-" + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
 		outputFile, _ := os.Create(path)
 		enc := json.NewEncoder(outputFile)
 		for _, kv := range kvs[i] {
@@ -85,7 +99,51 @@ func DoMap(mapf func(string, string) []KeyValue, task Task) {
 			}
 		}
 		outputFile.Close()
+		realPath := "mr-" + strconv.Itoa(task.TaskID) + "-" + strconv.Itoa(i)
+		os.Rename(path, realPath)
 	}
+}
+
+func DoReduce(reducef func(string, []string) string, task Task) {
+	intermediate := []KeyValue{}
+	for _, fileName := range task.FileNameList {
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", fileName)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(ByKey(intermediate))
+	oname := "mr-tmp-out-" + strconv.Itoa(task.TaskID)
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Fatalf("cannot create %v", oname)
+	}
+	i := 0
+	for i < len(intermediate) {
+		j := i
+		for j+1 < len(intermediate) && intermediate[j+1].Key == intermediate[j].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k <= j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j + 1
+	}
+	ofile.Close()
+	realName := "mr-out-" + strconv.Itoa(task.TaskID)
+	os.Rename(oname, realName)
 }
 
 func mapDone(task Task) {
@@ -98,12 +156,22 @@ func mapDone(task Task) {
 	}
 }
 
+func reduceDone(task Task) {
+	reply := struct{}{}
+	ok := call("Coordinator.MarkReduceDone", &task, &reply)
+	if ok {
+		fmt.Printf("Task %d Done\n", task.TaskID)
+	} else {
+		fmt.Printf("Task %d call markReduceDone failed\n", task.TaskID)
+	}
+}
+
 func GetTask() Task {
 	args := struct{}{}
 	reply := Task{}
 	ok := call("Coordinator.GiveTask", &args, &reply)
 	if ok {
-		fmt.Printf("Get task %d success\n", reply.TaskID)
+		fmt.Printf("Get task success, id: %d, state: %d\n", reply.TaskID, reply.TaskState)
 	} else {
 		reply.TaskState = Exit
 		fmt.Println("Get task Failed.")
@@ -152,6 +220,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
+	fmt.Println(err)
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
