@@ -157,7 +157,7 @@ func (c *Coordinator) GiveTask(args *struct{}, reply *Task) error {
 			reply.TaskState = Waiting
 		}
 	} else if c.phase == Reduce {
-		fmt.Printf("Master in reduce, channel %d left\n", len(c.reduceTaskChannel))
+		//fmt.Printf("Master in reduce, channel %d left\n", len(c.reduceTaskChannel))
 		if len(c.reduceTaskChannel) > 0 {
 			task := <-c.reduceTaskChannel
 			task.AssignTime = time.Now()
@@ -214,6 +214,7 @@ func (c *Coordinator) CrashRoutine() {
 	for true {
 		lock.Lock()
 		if c.phase == Done {
+			lock.Unlock()
 			break
 		}
 		var taskList []*Task

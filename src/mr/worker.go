@@ -50,7 +50,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	//CallExample()
 	for true {
-		fmt.Println("request task")
 		task := GetTask()
 		//fmt.Println(task.TaskState)
 		if task.TaskState == Working {
@@ -62,7 +61,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				reduceDone(task)
 			}
 		} else if task.TaskState == Waiting { //如果是map的waiting，但是map已经结束，先传waiting过来，但是master已经进入reduce
-			fmt.Println("All tasks have been assigned, waiting...")
+			//fmt.Println("All tasks have been assigned, waiting...")
 			time.Sleep(time.Second)
 		} else if task.TaskState == Exit {
 			//fmt.Println("Task ", task.TaskID, " has been done.")
@@ -150,7 +149,7 @@ func mapDone(task Task) {
 	reply := struct{}{}
 	ok := call("Coordinator.MarkMapDone", &task, &reply)
 	if ok {
-		fmt.Printf("Task %d Done\n", task.TaskID)
+		//fmt.Printf("Task %d Done\n", task.TaskID)
 	} else {
 		fmt.Printf("Task %d call markMapDone failed\n", task.TaskID)
 	}
@@ -160,7 +159,7 @@ func reduceDone(task Task) {
 	reply := struct{}{}
 	ok := call("Coordinator.MarkReduceDone", &task, &reply)
 	if ok {
-		fmt.Printf("Task %d Done\n", task.TaskID)
+		//fmt.Printf("Task %d Done\n", task.TaskID)
 	} else {
 		fmt.Printf("Task %d call markReduceDone failed\n", task.TaskID)
 	}
@@ -171,10 +170,10 @@ func GetTask() Task {
 	reply := Task{}
 	ok := call("Coordinator.GiveTask", &args, &reply)
 	if ok {
-		fmt.Printf("Get task success, id: %d, state: %d\n", reply.TaskID, reply.TaskState)
+		//fmt.Printf("Get task success, id: %d, state: %d\n", reply.TaskID, reply.TaskState)
 	} else {
 		reply.TaskState = Exit
-		fmt.Println("Get task Failed.")
+		//fmt.Println("Get task Failed.")
 	}
 	return reply
 }
@@ -220,7 +219,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err != nil {
 		log.Fatal("dialing:", err)
 	}
-	fmt.Println(err)
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
@@ -228,6 +226,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
 	return false
 }
