@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"fmt"
+	log2 "log"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -63,6 +66,15 @@ const (
 	Follower Status = iota
 	Candidate
 	Leader
+)
+
+type AppendEntriesReplyStatus int
+
+const (
+	NoReply    AppendEntriesReplyStatus = iota // call failure
+	FallBehind                                 // wrong leader, need to upd
+	LogUnmatch                                 // log not match, causing append failure
+	Success                                    // append success
 )
 
 //
@@ -116,6 +128,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -138,6 +157,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		log2.Fatalf("Decode Error\n")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 //
@@ -192,8 +223,11 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term   int
+	Status AppendEntriesReplyStatus
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 //
@@ -213,6 +247,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.status = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	//当前term，如果有多个，那么votedFor可能是别的
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
@@ -220,6 +255,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if args.LastLogTerm > lastLogTerm || args.LastLogTerm == lastLogTerm && args.LastLogIndex >= len(rf.log)-1 {
 			rf.votedFor = args.CandidateID
 			rf.lastTime = time.Now()
+			rf.persist()
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
 			PrettyDebug(dVote, "S%d in Term %d, vote for S%d, lastlogterm %d, args last term %d, loglen %d\n", rf.me, rf.currentTerm, args.CandidateID, lastLogTerm, args.LastLogTerm, len(rf.log))
@@ -270,13 +306,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	PrettyDebug(dAppend, "S%d in Term %d, receive AppendEntries from S%d, log length %d, leader commitindex %d\n", rf.me, rf.currentTerm, args.LeaderID, len(args.Entries), args.LeaderCommit)
 	if args.Term < rf.currentTerm {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		return
-	}
-	rf.lastTime = time.Now()
-	if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
+		reply.Status = FallBehind
 		reply.Term = rf.currentTerm
 		return
 	}
@@ -284,6 +314,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.status = Follower
 		rf.votedFor = -1
+		rf.persist()
+	}
+	rf.lastTime = time.Now()
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.Status = LogUnmatch
+		reply.XTerm = -1
+		reply.XLen = len(rf.log)
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Status = LogUnmatch
+		reply.Term = rf.currentTerm
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		for i := 0; i < len(rf.log); i++ {
+			if rf.log[i].Term == reply.XTerm {
+				reply.XIndex = i
+				break
+			}
+		}
+		return
 	}
 
 	conflict := -1
@@ -303,6 +353,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log, args.Entries[i-args.PrevLogIndex-1])
 		}
 	}
+	rf.persist()
 
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.log)-1 {
@@ -313,7 +364,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		PrettyDebug(dLog, "S%d in Term %d, commit index changes to %d\n", rf.me, rf.currentTerm, rf.commitIndex)
 	}
 	reply.Term = rf.currentTerm
-	reply.Success = true
+	reply.Status = Success
 
 }
 
@@ -350,6 +401,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    rf.currentTerm,
 		Command: command,
 	})
+	rf.persist()
 	PrettyDebug(dLog, "S%d in Term %d, index %d add command %v\n", rf.me, rf.currentTerm, index, command)
 	return index, term, true
 }
@@ -377,35 +429,36 @@ func (rf *Raft) killed() bool {
 
 // call sendAppendEntries here
 // return false if fails or doesn't get response, and reply is false
-func (rf *Raft) appendEntriesCaller(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) appendEntriesCaller(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	ok := rf.sendAppendEntries(server, args, reply)
-	if !ok {
-		reply.Success = false
-		return false
-	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if !ok || rf.currentTerm != args.Term {
+		reply.Status = NoReply
+		return
+	}
 	PrettyDebug(dAppend, "S%d in Term %d, AppendEntries to S%d success, reply term is %d\n", rf.me, rf.currentTerm, server, reply.Term)
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.status = Follower
 		rf.votedFor = -1
+		rf.persist()
 	}
-	return reply.Success
 }
 
 func (rf *Raft) requestVoteCaller(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.sendRequestVote(server, args, reply)
-	if !ok {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !ok || rf.currentTerm != args.Term {
 		reply.VoteGranted = false
 		return false
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.status = Follower
 		rf.votedFor = -1
+		rf.persist()
 	}
 	return reply.VoteGranted
 }
@@ -441,13 +494,26 @@ func (rf *Raft) appendChecker() {
 			}
 			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
-			ok := rf.appendEntriesCaller(serverID, &args, &reply)
+			rf.appendEntriesCaller(serverID, &args, &reply)
 			rf.mu.Lock()
-			if !ok {
-				if rf.nextIndex[serverID] > 1 {
-					rf.nextIndex[serverID]--
+			if reply.Status == LogUnmatch {
+				if reply.XTerm == -1 {
+					rf.nextIndex[serverID] = reply.XLen
+				} else {
+					followerTermLastIndex := -1
+					for i := len(rf.log) - 1; i >= 0; i-- {
+						if rf.log[i].Term == reply.XTerm {
+							followerTermLastIndex = i
+							break
+						}
+					}
+					if followerTermLastIndex == -1 {
+						rf.nextIndex[serverID] = reply.XIndex
+					} else {
+						rf.nextIndex[serverID] = followerTermLastIndex + 1
+					}
 				}
-			} else {
+			} else if reply.Status == Success {
 				oldnxt := rf.nextIndex[serverID]
 				if args.PrevLogIndex+len(args.Entries) > rf.matchIndex[serverID] {
 					rf.matchIndex[serverID] = args.PrevLogIndex + len(args.Entries)
@@ -506,6 +572,7 @@ func (rf *Raft) startElection() {
 	rf.votedFor = rf.me
 	rf.lastTime = time.Now()
 	rf.status = Candidate
+	rf.persist()
 	term := rf.currentTerm
 	candidateID := rf.me
 	lastLogIndex := len(rf.log) - 1
@@ -530,13 +597,14 @@ func (rf *Raft) startElection() {
 		getVotesMutex.Lock()
 		getVotes++
 		rf.mu.Lock()
+		PrettyDebug(dElec, "S%d in Term %d, get vote from %d, %d servers total\n", rf.me, rf.currentTerm, serverID, len(rf.peers))
 		if getVotes*2 > len(rf.peers) && rf.status == Candidate {
 			rf.status = Leader
 			for i := 0; i < len(rf.peers); i++ {
 				rf.nextIndex[i] = len(rf.log)
 				rf.matchIndex[i] = 0
 			}
-			PrettyDebug(dElec, "S%d in Term %d, wins election\n", rf.me, rf.currentTerm)
+			PrettyDebug(dElec, "S%d in Term %d, wins election, %d servers total\n", rf.me, rf.currentTerm, len(rf.peers))
 			go rf.leaderHeartbeat()
 			go rf.appendChecker()
 			go rf.commitChecker()
