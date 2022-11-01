@@ -290,7 +290,6 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 		ends[j] = cfg.net.MakeEnd(cfg.endnames[i][j])
 		cfg.net.Connect(cfg.endnames[i][j], j)
 	}
-
 	cfg.mu.Lock()
 
 	cfg.lastApplied[i] = 0
@@ -599,7 +598,6 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				//PrettyDebug(dError, "command: %d\n", cmd)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
