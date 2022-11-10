@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,11 +19,16 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key       string
+	Value     string
+	OpType    string
+	LeaderID  int
+	CommandID int
+	ClientID  int64
 }
 
 type KVServer struct {
@@ -35,15 +41,104 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	kvMap    map[string]string
+	waitChan map[int]chan Op
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	command := Op{
+		Key:       args.Key,
+		CommandID: args.CommandID,
+		ClientID:  args.ClientID,
+		OpType:    "Get",
+		LeaderID:  kv.me,
+	}
+	index, _, ifLeader := kv.rf.Start(command)
+	if ifLeader == false {
+		DPrintf("Server %d receive get, client %d, commandID %d, but not leader\n", kv.me, args.ClientID, args.CommandID)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("Leader Server %d receive Get, index %d, key %s, client %d, commandID %d\n", kv.me, index, args.Key, args.ClientID, args.CommandID)
+	waitCh := kv.getWaitCh(index)
+	_ = <-waitCh
+	DPrintf("Leader Server %d receives Get from waitChan, index %d\n", kv.me, index)
+	kv.mu.Lock()
+	val, ok := kv.kvMap[args.Key]
+	kv.mu.Unlock()
+	if ok == false {
+		reply.Err = ErrNoKey
+		return
+	}
+	reply.Value = val
+	reply.Err = OK
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	command := Op{
+		Key:       args.Key,
+		CommandID: args.CommandID,
+		ClientID:  args.ClientID,
+		OpType:    args.Op,
+		Value:     args.Value,
+		LeaderID:  kv.me,
+	}
+	index, _, ifLeader := kv.rf.Start(command)
+	if ifLeader == false {
+		DPrintf("Server %d receive %s, client %d, commandID %d, but not leader\n", kv.me, args.Op, args.ClientID, args.CommandID)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("Leader Server %d receive %s, index %d, key %s, val %s, client %d, commandID %d\n", kv.me, args.Op, index, args.Key, args.Value, args.ClientID, args.CommandID)
+	waitCh := kv.getWaitCh(index)
+	_ = <-waitCh
+	DPrintf("Leader Server %d receives %s command from waitChan, index %d\n", kv.me, args.Op, index)
+	kv.mu.Lock()
+	_, ok := kv.kvMap[args.Key]
+	kv.mu.Unlock()
+	if ok == false && args.Op == "Append" {
+		reply.Err = ErrNoKey
+		return
+	}
+	reply.Err = OK
+}
+
+func (kv *KVServer) applyMsgChecker() {
+	for kv.killed() == false {
+		msg := <-kv.applyCh
+		DPrintf("Server %d find ApplyMsg index %d\n", kv.me, msg.CommandIndex)
+		index := msg.CommandIndex
+		op := msg.Command.(Op)
+		if kv.me == op.LeaderID {
+			//only the corresponding leader needs to be notified
+			waitCh := kv.getWaitCh(index)
+			waitCh <- op
+			DPrintf("Server %d finds index %d command finished, back to waitChan\n", kv.me, msg.CommandIndex)
+		}
+		kv.mu.Lock()
+		if op.OpType == "Put" {
+			kv.kvMap[op.Key] = op.Value
+		}
+		if op.OpType == "Append" {
+			kv.kvMap[op.Key] += op.Value
+		}
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *KVServer) getWaitCh(index int) chan Op {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	res, exist := kv.waitChan[index]
+	if !exist {
+		kv.waitChan[index] = make(chan Op)
+		res = kv.waitChan[index]
+	}
+	return res
 }
 
 //
@@ -96,6 +191,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.kvMap = make(map[string]string)
+	kv.waitChan = make(map[int]chan Op)
 
+	go kv.applyMsgChecker()
 	return kv
 }
