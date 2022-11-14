@@ -266,7 +266,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applyChecker()
-	go rf.debuger()
+	//go rf.debuger()
 
 	return rf
 }

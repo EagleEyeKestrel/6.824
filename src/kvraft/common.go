@@ -8,6 +8,11 @@ const (
 
 type Err string
 
+type pair struct {
+	clientID  int64
+	commandID int
+}
+
 // Put or Append
 type PutAppendArgs struct {
 	Key   string

@@ -59,7 +59,8 @@ func (ck *Clerk) Get(key string) string {
 		DPrintf("Client %d send Server %d Get, commandID %d, key %s\n", ck.clientID, receiver, ck.commandNum, key)
 		ok := ck.sendGet(receiver, &args, &reply)
 		if !ok {
-			time.Sleep(100 * time.Millisecond)
+			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		if reply.Err == ErrWrongLeader {
@@ -100,7 +101,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		DPrintf("Client %d send Server %d %s, commandID %d, key %s, value %s\n", ck.clientID, receiver, op, ck.commandNum, key, value)
 		ok := ck.sendPutAppend(receiver, &args, &reply)
 		if !ok {
-			time.Sleep(100 * time.Millisecond)
+			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		if reply.Err == ErrWrongLeader {
