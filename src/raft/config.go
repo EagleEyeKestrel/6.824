@@ -290,7 +290,6 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 		ends[j] = cfg.net.MakeEnd(cfg.endnames[i][j])
 		cfg.net.Connect(cfg.endnames[i][j], j)
 	}
-
 	cfg.mu.Lock()
 
 	cfg.lastApplied[i] = 0
