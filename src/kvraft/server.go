@@ -43,11 +43,13 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	kvMap         map[string]string
-	waitChan      map[int]chan Op
-	lastCommandID map[int64]int
-	replyMap      map[pair]interface{}
-	waiting       map[pair]int
+	KVMap         map[string]string
+	WaitChan      map[int]chan Op      // command index -> wait channel
+	LastCommandID map[int64]int        // to a server, clientID -> last commandID
+	ReplyMap      map[Pair]interface{} // command -> reply
+	Waiting       map[Pair]int         // command -> if server is waiting to reply
+	persister     *raft.Persister
+	LastApplied   int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -61,18 +63,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		LeaderID:  kv.me,
 	}
 	kv.mu.Lock()
-	key := pair{
-		clientID:  args.ClientID,
-		commandID: args.CommandID,
+	key := Pair{
+		ClientID:  args.ClientID,
+		CommandID: args.CommandID,
 	}
-	if args.CommandID <= kv.lastCommandID[args.ClientID] {
-		lastReply := kv.replyMap[key].(GetReply)
-		reply.Err = lastReply.Err
-		reply.Value = lastReply.Value
-		kv.mu.Unlock()
-		return
-	}
-	kv.waiting[key] = 1
+	//if args.CommandID <= kv.LastCommandID[args.ClientID] {
+	//	lastReply := kv.ReplyMap[key].(GetReply)
+	//	reply.Err = lastReply.Err
+	//	reply.Value = lastReply.Value
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	kv.Waiting[key] = 1
 	kv.mu.Unlock()
 
 	index, _, ifLeader := kv.rf.Start(command)
@@ -86,12 +88,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	select {
 	case _ = <-waitCh:
 		DPrintf("Leader Server %d receives Get from waitChan, command %v, acquire lock\n", kv.me, command)
-		key := pair{
-			clientID:  args.ClientID,
-			commandID: args.CommandID,
+		key := Pair{
+			ClientID:  args.ClientID,
+			CommandID: args.CommandID,
 		}
 		kv.mu.Lock()
-		res := kv.replyMap[key].(GetReply)
+		res := kv.ReplyMap[key].(GetReply)
 		reply.Err = res.Err
 		reply.Value = res.Value
 		kv.mu.Unlock()
@@ -101,8 +103,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 	}
 	kv.mu.Lock()
-	delete(kv.waiting, key)
-	delete(kv.waitChan, index)
+	delete(kv.Waiting, key)
+	delete(kv.WaitChan, index)
 	kv.mu.Unlock()
 }
 
@@ -118,17 +120,17 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	DPrintf("Server %d receive %s, key %s, client %d, command %v\n", kv.me, args.Op, args.Key, args.ClientID, command)
 	kv.mu.Lock()
-	key := pair{
-		clientID:  args.ClientID,
-		commandID: args.CommandID,
+	key := Pair{
+		ClientID:  args.ClientID,
+		CommandID: args.CommandID,
 	}
-	if args.CommandID <= kv.lastCommandID[args.ClientID] {
-		lastReply := kv.replyMap[key].(PutAppendReply)
-		reply.Err = lastReply.Err
-		kv.mu.Unlock()
-		return
-	}
-	kv.waiting[key] = 1
+	//if args.CommandID <= kv.LastCommandID[args.ClientID] {
+	//	lastReply := kv.ReplyMap[key].(PutAppendReply)
+	//	reply.Err = lastReply.Err
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	kv.Waiting[key] = 1
 	kv.mu.Unlock()
 
 	index, _, ifLeader := kv.rf.Start(command)
@@ -142,12 +144,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case _ = <-waitCh:
 		DPrintf("Leader Server %d receives %s from waitChan, command %v, acquire lock\n", kv.me, args.Op, command)
-		key := pair{
-			clientID:  args.ClientID,
-			commandID: args.CommandID,
+		key := Pair{
+			ClientID:  args.ClientID,
+			CommandID: args.CommandID,
 		}
 		kv.mu.Lock()
-		res := kv.replyMap[key].(PutAppendReply)
+		res := kv.ReplyMap[key].(PutAppendReply)
 		reply.Err = res.Err
 		kv.mu.Unlock()
 		DPrintf("Leader Server %d finish command index %d, release lock\n", kv.me, index)
@@ -156,93 +158,94 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 	}
 	kv.mu.Lock()
-	delete(kv.waiting, key)
-	delete(kv.waitChan, index)
+	delete(kv.Waiting, key)
+	delete(kv.WaitChan, index)
 	kv.mu.Unlock()
-}
-
-func (kv *KVServer) applyMsgChecker() {
-	for kv.killed() == false {
-		msg := <-kv.applyCh
-		DPrintf("Server %d find ApplyMsg index %d, command %v\n", kv.me, msg.CommandIndex, msg.Command)
-		index := msg.CommandIndex
-		op := msg.Command.(Op)
-		DPrintf("Server %d receive ApplyMsg %d, acquire lock in applyMsgChecker\n", kv.me, index)
-		kv.mu.Lock()
-		if op.CommandID > kv.lastCommandID[op.ClientID] {
-			kv.installCommand(op)
-		}
-		key := pair{
-			clientID:  op.ClientID,
-			commandID: op.CommandID,
-		}
-		_, ifWaiting := kv.waiting[key]
-		kv.mu.Unlock()
-		DPrintf("Server %d receive ApplyMsg %d, release lock in applyMsgChecker\n", kv.me, index)
-		if kv.me == op.LeaderID && ifWaiting {
-			//only the corresponding leader needs to be notified
-			waitCh := kv.getWaitCh(index)
-			DPrintf("Server %d waits op %v back to waitChan\n", kv.me, op)
-			waitCh <- op
-			DPrintf("Server %d finds index %d command finished, back to waitChan\n", kv.me, msg.CommandIndex)
-		}
-		//time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func (kv *KVServer) getWaitCh(index int) chan Op {
 	DPrintf("Server %d command index %d getWaitCh, acquire lock\n", kv.me, index)
 	kv.mu.Lock()
-	res, exist := kv.waitChan[index]
+	res, exist := kv.WaitChan[index]
 	if !exist {
-		kv.waitChan[index] = make(chan Op, 1)
-		res = kv.waitChan[index]
+		kv.WaitChan[index] = make(chan Op, 1)
+		res = kv.WaitChan[index]
 	}
 	kv.mu.Unlock()
 	DPrintf("Server %d command index %d getWaitCh, release lock\n", kv.me, index)
 	return res
 }
 
+func (kv *KVServer) processOutdatedCommand(op Op) {
+	// outdated command, generate replyMap in case it's a request before crashing
+	// hold lock before entering
+	key := Pair{
+		CommandID: op.CommandID,
+		ClientID:  op.ClientID,
+	}
+	if _, ifProcessed := kv.ReplyMap[key]; ifProcessed {
+		return
+	}
+	if op.OpType == "Put" || op.OpType == "Append" {
+		reply := PutAppendReply{
+			Err: OK,
+		}
+		kv.ReplyMap[key] = reply
+	}
+	if op.OpType == "Get" {
+		reply := GetReply{}
+		val, hasKey := kv.KVMap[op.Key]
+		if hasKey {
+			reply.Err = OK
+			reply.Value = val
+		} else {
+			reply.Err = ErrNoKey
+		}
+		kv.ReplyMap[key] = reply
+	}
+
+}
+
 func (kv *KVServer) installCommand(op Op) {
-	//only here can modify KVMap and generate replyMap
-	//hold lock before entering
-	kv.lastCommandID[op.ClientID] = op.CommandID
-	key := pair{
-		commandID: op.CommandID,
-		clientID:  op.ClientID,
+	// new command, generate replyMap and modify KVMap
+	// hold lock before entering
+	kv.LastCommandID[op.ClientID] = op.CommandID
+	key := Pair{
+		CommandID: op.CommandID,
+		ClientID:  op.ClientID,
 	}
 	if op.OpType == "Put" {
-		kv.kvMap[op.Key] = op.Value
+		kv.KVMap[op.Key] = op.Value
 		reply := PutAppendReply{
 			Err: OK,
 		}
-		kv.replyMap[key] = reply
+		kv.ReplyMap[key] = reply
 	}
 	if op.OpType == "Append" {
-		val, exist := kv.kvMap[op.Key]
+		val, exist := kv.KVMap[op.Key]
 		if exist {
-			kv.kvMap[op.Key] = val + op.Value
+			kv.KVMap[op.Key] = val + op.Value
 		} else {
-			kv.kvMap[op.Key] = op.Value
+			kv.KVMap[op.Key] = op.Value
 		}
 		reply := PutAppendReply{
 			Err: OK,
 		}
-		kv.replyMap[key] = reply
+		kv.ReplyMap[key] = reply
 	}
 	if op.OpType == "Get" {
 		reply := GetReply{
 			Err: OK,
 		}
-		val, exist := kv.kvMap[op.Key]
+		val, exist := kv.KVMap[op.Key]
 		if exist {
 			reply.Value = val
 		} else {
 			reply.Err = ErrNoKey
 		}
-		kv.replyMap[key] = reply
+		kv.ReplyMap[key] = reply
 	}
-	DPrintf("Server %d, install command %v, reply %v", kv.me, op, kv.replyMap[key])
+	DPrintf("Server %d, install command %v, reply %v", kv.me, op, kv.ReplyMap[key])
 }
 
 //
@@ -284,6 +287,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	//labgob.Register(Pair{})
+	labgob.Register(PutAppendReply{})
+	labgob.Register(GetReply{})
 
 	kv := new(KVServer)
 	kv.me = me
@@ -295,12 +301,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.kvMap = make(map[string]string)
-	kv.waitChan = make(map[int]chan Op)
-	kv.lastCommandID = make(map[int64]int)
-	kv.replyMap = make(map[pair]interface{})
-	kv.waiting = make(map[pair]int)
+	kv.KVMap = make(map[string]string)
+	kv.WaitChan = make(map[int]chan Op)
+	kv.LastCommandID = make(map[int64]int)
+	kv.ReplyMap = make(map[Pair]interface{})
+	kv.Waiting = make(map[Pair]int)
+	kv.LastApplied = 0
+	kv.persister = persister
+
+	kv.readPersist(persister.ReadSnapshot())
 
 	go kv.applyMsgChecker()
+	go kv.raftSizeChecker()
 	return kv
 }

@@ -70,6 +70,9 @@ func (ck *Clerk) Get(key string) string {
 		if reply.Err == ErrNoKey {
 			return ""
 		}
+		if reply.Err == ErrOutDated {
+			continue
+		}
 		return reply.Value
 	}
 	return ""
@@ -107,6 +110,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 		if reply.Err == ErrWrongLeader {
 			ck.leaderID = (ck.leaderID + 1) % len(ck.servers)
+			continue
+		}
+		if reply.Err == ErrOutDated {
 			continue
 		}
 		return

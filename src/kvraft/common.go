@@ -4,13 +4,14 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrOutDated    = "ErrOutDated"
 )
 
 type Err string
 
-type pair struct {
-	clientID  int64
-	commandID int
+type Pair struct {
+	ClientID  int64
+	CommandID int
 }
 
 // Put or Append
